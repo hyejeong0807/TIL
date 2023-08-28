@@ -80,5 +80,111 @@ printf("exec error\n");
 ```
 이 예제는 인자 목록 echo hello를 가지고 실행하는 프로그램 /bin/echo 인스턴스로 호출 프로그램을 교체합니다. 대부분의 프로그램은 인자 배열의 첫 번째 요소는 프로그램 이름이므로 무시합니다.  
 
-### 1.2 I/O and File descriptors
+#### sh.c
+xv6 쉘은 유저 대신에 프로그램을 실행시키기 위해 위와 같은 호출을 사용합니다. 
 
+```
+sh.c:145
+int
+main(void)
+{
+    '''
+    // getcmd를 사용하여 유저의 입력을 읽습니다. 
+    while(getcmd(buf, sizeof(buf)) >= 0)
+    '''
+}
+```
+
+### 1.2 I/O and File descriptors
+File descriptor는 프로세스가 읽고 쓸 수 있는 kernel-managed object를 나타내는 작은 정수입니다. 프로세스는 파일, 디렉터리, 디바이스를 열거나 파이프를 생성하거나 존재하는 descriptor를 복제하여 file descriptor를 얻을 수 있습니다. 파일 디스크립터 인터페이스는 파일, 파이프, 디바이스 간의 차이점을 추상화여 바이트 스트림과 같이 보이게 만듭니다. 
+
+xv6 커널은 프로세스별 테이블의 인덱스로 파일 디스크립터를 사용하여 모든 프로세스는 zero에서 시작하여 프라이빗한 파일 디스크립터 공간을 가집니다. 프로세스는 파일 디스크립터 0에서 read, 1에서 write 그리고 2에서 에러 메시지를 write 합니다. 앞으로 살며보겠지만, 쉘은 I/O 리다이렉션과 파이프라인을 구현하기 위해 규칙을 활용합니다. 쉘은 항상 콘설의 기본 파일 디스크립터인 세 개의 파일 디스크립터가 열려 있는지 확인합니다. 
+
+```
+user/sh.c: 151
+...
+while((fd = open("console", O_RDWR)) >= 0){
+    ...
+}
+...
+```
+
+read와 write 시스템 호출은 파일 디스크립터가 호명한 열린 파일에 바이트를 읽고 씁니다. 호출 read(fd,buf,n)은 파일 디스크립터 fd로 부터 최대 n 바이트를 읽고 buf에 복사하고 읽은 바이트 수를 반환합니다. 파일을 참조하는 각 파일 디스크립터는 파일과 연관된 오프셋을 가집니다. read는 현재 파일 오프셋으로 부터 데이터를 읽고 읽은 바이트의 수만큼 오프셋을 이동시킵니다. Subsequent read는 처음 읽기에서 반환된 바이트 다음의 바이트를 반환합니다. 더 이상 읽을 바이트가 없으면 read는 파일의 끝을 나타내는 zero를 반환합니다. 
+
+write(fd,buf,n) 호출은 buf에서 파일 디스크립터 fd에 n 바이트를 쓰고 쓰여진 바이트의 수를 반환합니다. n 바이트 미만은 오류가 발생했을 경우에만 기록됩니다. read와 마찬가지로 write는 현재 파일 오프셋에서 데이터를 쓴 다음 쓰여진 바이트 수만큼 해당 오프셋을 이동합니다. 각 쓰기는 이전 쓰기가 중단된 지점에서 시작됩니다.
+
+다음 프로그램은 표준 입력 데이터를 표준 출력으로 복사합니다. 오류가 발생하면 표준 오류 메세지를 작성합니다. 
+
+```
+char buf[512];
+int n;
+
+for(;;) {
+    n = read(0, buf, sizeof buf);
+    if (n == 0)
+        break;
+    if (n < 0){
+        fprintf(2, "read error\n");
+        exit(1);
+    }
+    if (write(1, buf, n) != n) {
+        fprintf(2, "write error\n");
+        exit(1);
+    }
+}
+```
+코드에서 중요한 것은 cat이 파일, 콘솔, 파이프에서 읽는지 알지 못합니다. 마찬가지로 cat이 콘솔, 파일 등으로 프린팅하는지 아닌지 알지 못합니다. 파일 디스크립터의 사용과 파일 디스크립터 0은 입력 파일 디스크립터 1은 출력이라는 규칙은 cat의 구현을 단순하게 만듭니다. 
+
+close 시스템 호출은 파일 디스크립터를 해제하여 향후 open, pipe, dup 시스템 호출에서 재사용할 수 있도록 합니다. 새롭게 할당된 파일 디스크립터는 항상 현재 프로세스의 사용되지 않는 가장 낮은 숫자입니다. 
+
+파일 디스크립터와 fork가 상호작용하여 I/O 리다이렉션울 쉽게 구현할 수 있습니다. fork는 parent의 파일 디스크립터 테이블을 메모리와 함께 복사하여 child는 parent와 정확하게 같은 open file로 시작합니다. 시스템 호출 exec은 호출 프로세스의 메모리를 교체하지만 파일 테이블은 유지합니다. 이 동작을 통해 쉘은 child에서 선택된 파일 디스크립터를 fork하고 reopen하여 I/O 리다이렉션을 구현할 수 있습니다. 여기서 cat < input.txt 커맨드에 대해 쉘이 실행되는 단순 버전입니다. 
+```
+char *argv[2];
+
+argv[0] = "cat";
+argv[1] = 0;
+if (fork() == 0){
+    close(0);
+    open("input.txt", O_RDONLY);
+    exec("cat", argv);
+}
+```
+child가 파일 디스크립터 0을 닫은 후 open은 새로 오픈된 input.txt을 위한 파일 디스크립터 사용을 보장할 수 있습니다. 0은 사용할 수 있는 파일 디스크립터 중 가장 작은 숫자입니다. cat은 input.txt를 참조하는 파일 디스크립터 0을 실행합니다. parent 프로세스의 파일 디스크립터는 child의 디스트립터만 수정하기 때문에 해당 시퀀스에 의해 변경되지 않습니다. 
+
+The code for I/O redirection in the xv6 shell works in exactly this way (user/sh.c:82). Recall that at this point in the code the shell has already forked the child shell and that runcmd will call exec to load the new program. 
+
+open의 두 번째 인자는 open이 무엇을 하는지 제어하는 비트로 표현되는 플래그의 집합으로 구성되어 있습니다. 가능한 값은 file control (fcntl) header (kernel/fcntl.h:1-5)에 정의되어 있습니다. O_RDONLY, O_WRONLY, O_RDWR, O_CREATE, O_TRUNC로 각각 파일을 읽고, 쓰고, 읽기와 쓰기를 하고, 파일이 존재하지 않으면 생성하고, zero 길이로 파일을 자르도록 open에 지시합니다. 
+
+지금까지 fork와 exec이 왜 분리되는 것이 도움이 되는지 명백해졌습니다. 이 두 가지는 쉘은 메인 쉘의 I/O 설정을 방해하지 않고 child의 I/O를 리다이렉트할 기회를 가집니다. 
+
+dup 시스템 호출은 기존의 파일 디스크립터를 복제하여 같은 I/O 오브젝트를 참조하는 새로운 디스크립터를 반환합니다. 두 개의 파일 디스크립터는 fork에 의해 복제된 파일 디스크립터와 같이 오프셋을 공유합니다. 
+```
+fd = dup(1);
+write(1, "hello ", 6);
+write(fd, "world\n", 6);
+```
+### 1.3 Pipes
+파이프는 한 쪽에 읽기 다른 한 쪽은 쓰기와 같은 파일 디스크립터의 쌍으로 프로세스에 보여지는 작은 커널 버퍼입니다. 파이프의 한쪽 끝에서 데이터를 쓰면 파이프의 다른 한쪽 끝에서는 데이터를 읽을 수 있도록 합니다. 파이프는 프로세스가 통신하기 위한 방법을 제공합니다. 
+
+예제 코드는 파이프의 read 끝에서 연결된 표준 입력 wc 프로그램을 실행합니다. 
+```
+int p[2];
+char *argv[2];
+
+argv[0] = "wc";
+argv[1] = 0;
+
+pipe(p);
+if(fork() == 0) {
+    close(0);
+    dup(p[0]);
+    close(p[0]);
+    close(p[1]);
+    exec("/bin/wc", argv);
+} else {
+    close(p[0]);
+    write(p[1], "hello world\n", 12);
+    close(p[1]);
+}
+```
+프로그램은 새로운 파이프를 생성하고 배열 p에 read와 write 파일 디스크립터를 기록합니다. fork 후 parent와 child 모두 파이프를 참조하는 파일 디스크립터를 가지고 있습니다. child는 
